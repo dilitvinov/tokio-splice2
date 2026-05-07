@@ -3,11 +3,12 @@
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
+use std::future::Future;
 use std::task::{ready, Context, Poll};
 use std::{fmt, io};
-
+use std::time::Duration;
 use rustix::pipe::{splice, SpliceFlags};
-
+use tokio::time::Sleep;
 use crate::io::{AsyncReadFd, AsyncWriteFd, IsFile, IsNotFile, SpliceIo};
 use crate::pipe::Pipe;
 use crate::traffic::TrafficResult;
@@ -33,6 +34,11 @@ pub struct SpliceIoCtx<R, W> {
     /// Whether need to flush `W` after splicing.
     need_flush: bool,
 
+    /// Duration used to arm `drain_deadline` on each wait; `None` means no timeout.
+    drain_timeout: Option<Duration>,
+    /// Armed sleep future; created lazily from `drain_timeout` on first wait.
+    drain_deadline: Option<Pin<Box<Sleep>>>,
+
     r: PhantomData<R>,
     w: PhantomData<W>,
 }
@@ -46,6 +52,8 @@ impl<R, W> fmt::Debug for SpliceIoCtx<R, W> {
             .field("has_read", &self.has_read)
             .field("has_written", &self.has_written)
             .field("need_flush", &self.need_flush)
+            .field("drain_timeout", &self.drain_timeout)
+            .field("drain_deadline", &self.drain_deadline.as_ref().map(|_| "Some(Sleep)"))
             .finish()
     }
 }
@@ -60,6 +68,8 @@ impl<R, W> SpliceIoCtx<R, W> {
             has_read: 0,
             has_written: 0,
             need_flush: false,
+            drain_timeout: None,
+            drain_deadline: None,
             r: PhantomData,
             w: PhantomData,
         })
@@ -185,6 +195,22 @@ impl<R, W> SpliceIoCtx<R, W> {
     pub fn set_pipe_size(mut self, pipe_size: usize) -> io::Result<Self> {
         self.pipe.set_pipe_size(pipe_size)?;
         Ok(self)
+    }
+
+    /// Set a read-idle timeout for `poll_splice_drain`.
+    ///
+    /// If no data arrives within `duration` of the last successful read (or
+    /// from the start of the first wait), the drain returns [`Drained::Done`]
+    /// and closes the pipe write side, signalling end-of-stream to the caller.
+    ///
+    /// By default no timeout is applied.
+    pub fn with_drain_timeout(mut self, duration: Duration) -> Self {
+        self.drain_timeout = Some(duration);
+        self
+    }
+
+    pub(crate) fn set_drain_timeout(&mut self, duration: Duration) {
+        self.drain_timeout = Some(duration);
     }
 }
 
@@ -317,6 +343,21 @@ where
             // end of the pipe is full, but this shouldn't be a concern here, since
             // the pipe buffer must be sufficient (all buffered bytes will be written to
             // writer after this).
+
+            // If a drain timeout is configured, arm it on first entry and poll it
+            // alongside poll_read_ready; both register their wakers so the task
+            // wakes up on whichever fires first.
+            if let Some(timeout) = self.drain_timeout {
+                let sleep = self
+                    .drain_deadline
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+                if Future::poll(sleep.as_mut(), cx).is_ready() {
+                    self.drain_deadline = None;
+                    self.pipe.set_splice_drain_finished();
+                    break Poll::Ready(Ok(Drained::Done));
+                }
+            }
+
             ready!(r.poll_read_ready(cx))?;
 
             match r.try_io_read(|| {
@@ -334,6 +375,7 @@ where
                 Ok(Some(drained)) => {
                     self.has_read += drained.get();
                     self.size_to_splice -= drained.get();
+                    self.drain_deadline = None;
 
                     break Poll::Ready(Ok(Drained::Some(drained)));
                 }

@@ -7,6 +7,7 @@ use std::marker::PhantomPinned;
 use std::os::fd::AsFd;
 use std::pin::{pin, Pin};
 use std::task::{ready, Context, Poll};
+use std::time::Duration;
 use std::{io, ops};
 
 use crossbeam_utils::CachePadded;
@@ -83,6 +84,16 @@ impl<R, W> SpliceIo<R, W, RATE_LIMITER_DISABLED> {
             rate_limiter: RateLimiter::new(limit),
             state: self.state,
         }
+    }
+}
+
+impl<R, W, const RATE_LIMITER_IS_ENABLED: bool> SpliceIo<R, W, RATE_LIMITER_IS_ENABLED> {
+    /// Set a read-idle timeout for the drain phase.
+    ///
+    /// Delegates to [`SpliceIoCtx::with_drain_timeout`].
+    pub fn with_drain_timeout(mut self, duration: Duration) -> Self {
+        self.ctx.set_drain_timeout(duration);
+        self
     }
 }
 
@@ -321,6 +332,17 @@ where
     SL: AsyncReadFd + AsyncWriteFd + IsNotFile,
     SR: AsyncReadFd + AsyncWriteFd + IsNotFile,
 {
+    /// Set a read-idle timeout for the drain phase on both directions.
+    ///
+    /// If no data arrives within `duration` after the last successful read,
+    /// the stalled direction returns [`Drained::Done`], closing its pipe write
+    /// side and signalling end-of-stream. By default no timeout is applied.
+    pub fn with_drain_timeout(mut self, duration: Duration) -> Self {
+        self.io_sl2sr = self.io_sl2sr.with_drain_timeout(duration);
+        self.io_sr2sl = self.io_sr2sl.with_drain_timeout(duration);
+        self
+    }
+
     /// Performs zero-copy data transfer between `SL` and `SR` using the
     /// splice syscall.
     ///

@@ -106,6 +106,44 @@ where
     .await)
 }
 
+#[inline]
+/// Copies data in both directions between `sl` and `sr`, with a read-idle timeout.
+///
+/// Behaves identically to [`copy_bidirectional`], except that if either
+/// direction stops receiving data for longer than `drain_timeout`, that
+/// direction is treated as finished: its pipe write side is closed and the
+/// transfer concludes normally (no error is returned for the timeout itself).
+///
+/// This is useful to prevent a connection from stalling indefinitely when the
+/// remote peer stops sending but does not close the connection.
+///
+/// # Parameters
+///
+/// - `sl`, `sr` — the two streams to bridge.
+/// - `drain_timeout` — maximum time to wait for new data on a single read
+///   attempt before treating the source as exhausted.
+///
+/// # Errors
+///
+/// * Create pipe failed.
+pub async fn copy_bidirectional_with_timeout<A, B>(
+    sl: &mut A,
+    sr: &mut B,
+    drain_timeout: std::time::Duration,
+) -> std::io::Result<traffic::TrafficResult>
+where
+    A: io::AsyncReadFd + io::AsyncWriteFd + IsNotFile + Unpin,
+    B: io::AsyncReadFd + io::AsyncWriteFd + IsNotFile + Unpin,
+{
+    Ok(io::SpliceBidiIo {
+        io_sl2sr: context::SpliceIoCtx::prepare()?.into_io(),
+        io_sr2sl: context::SpliceIoCtx::prepare()?.into_io(),
+    }
+    .with_drain_timeout(drain_timeout)
+    .execute(sl, sr)
+    .await)
+}
+
 // === Tracing macros for logging ===
 
 #[allow(unused)]

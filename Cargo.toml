@@ -26,7 +26,7 @@ rustdoc-args = [
 crossbeam-utils = "0.8.21"
 pin-project = "1.1.10"
 rustix = { version = "1.0.0", features = ["pipe"] }
-tokio = { version = "1.47.1", features = ["fs", "net"] }
+tokio = { version = "1.47.1", features = ["fs", "net", "time"] }
 tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]

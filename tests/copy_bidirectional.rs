@@ -5,7 +5,7 @@ use std::io::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task;
-use tokio_splice2::copy_bidirectional;
+use tokio_splice2::{copy_bidirectional, copy_bidirectional_with_timeout};
 
 async fn echo_server(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -70,6 +70,47 @@ async fn test_proxy() -> Result<()> {
     echo_handle.abort();
     proxy_handle.abort();
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_drain_timeout() -> Result<()> {
+    use std::time::Duration;
+
+    let echo_handle = task::spawn(echo_server("127.0.0.1:19997"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let proxy_handle = task::spawn(async {
+        let listener = TcpListener::bind("127.0.0.1:18987").await?;
+        let (mut conn, _) = listener.accept().await?;
+        let mut upstream = TcpStream::connect("127.0.0.1:19997").await?;
+        copy_bidirectional_with_timeout(&mut conn, &mut upstream, Duration::from_millis(50))
+            .await?;
+        Ok::<_, std::io::Error>(())
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut client = TcpStream::connect("127.0.0.1:18987").await?;
+
+    // Send one chunk and verify it is echoed back.
+    let msg = b"Hello, drain timeout!";
+    client.write_all(msg).await?;
+    let mut buf = vec![0u8; msg.len()];
+    client.read_exact(&mut buf).await?;
+    assert_eq!(&buf, msg);
+
+    // Go silent — the drain timeout must fire and the proxy task must finish.
+    tokio::time::timeout(Duration::from_millis(500), proxy_handle)
+        .await
+        .expect("copy_bidirectional_with_timeout did not return within 500 ms")
+        .expect("proxy task panicked")?;
+
+    // Proxy dropped its server-side socket — client must see EOF.
+    let mut buf = vec![0u8; 1];
+    let n = client.read(&mut buf).await?;
+    assert_eq!(n, 0, "expected EOF after drain timeout closed the connection");
+
+    echo_handle.abort();
     Ok(())
 }
 
