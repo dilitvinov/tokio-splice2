@@ -200,7 +200,7 @@ impl<R, W> SpliceIoCtx<R, W> {
     /// Set a read-idle timeout for `poll_splice_drain`.
     ///
     /// If no data arrives within `duration` of the last successful read (or
-    /// from the start of the first wait), the drain returns [`Drained::Done`]
+    /// from the start of the first wait), the drain completes
     /// and closes the pipe write side, signalling end-of-stream to the caller.
     ///
     /// By default no timeout is applied.

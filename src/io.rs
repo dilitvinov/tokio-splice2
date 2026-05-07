@@ -335,7 +335,7 @@ where
     /// Set a read-idle timeout for the drain phase on both directions.
     ///
     /// If no data arrives within `duration` after the last successful read,
-    /// the stalled direction returns [`Drained::Done`], closing its pipe write
+    /// the stalled direction completes its drain, closing its pipe write
     /// side and signalling end-of-stream. By default no timeout is applied.
     pub fn with_drain_timeout(mut self, duration: Duration) -> Self {
         self.io_sl2sr = self.io_sl2sr.with_drain_timeout(duration);
